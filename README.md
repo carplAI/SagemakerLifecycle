@@ -1,7 +1,7 @@
 # SagemakerLifecycle
 
 
-## Bootstrap code to init  sagemaker environment with predefined code
+## Bootstrap code to init  sagemaker environment.
 
 
 
