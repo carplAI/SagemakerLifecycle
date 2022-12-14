@@ -256,7 +256,48 @@ def predict_fn(input_object, model):
 def output_fn(predictions, content_type):
     assert content_type == 'application/json'
     res = predictions.cpu().numpy().tolist()
+    output = response_converter(res)
     return json.dumps(res)
+
+
+def response_converter(res):
+    '''
+    THIS IS A CUSTOM RESPONSE CCONVERTER
+    CARPL EXPECTS OUTPUT IN THIS FORMAT:
+    {
+        "response": {
+            "findings":[
+                {
+                    "name":"class_A",
+                    "probability":score_A
+                },
+                {
+                    "name":"class_B",
+                    "probability":score_B
+                }
+            ]
+        }
+    }
+    '''
+    import numpy as np
+    try:
+        assert isinstance(res, list)
+        assert isinstance(res[0],list)
+
+        result = []
+        score = int(np.argmin(res[0]))
+        # for e,val in enumerate(res[0]):
+        result.append(
+            {
+                "name":"class",
+                "probability":score
+            }
+        )
+
+        return {"response" : {"findings":result}}
+    except Exception as e:
+        print(e) 
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
