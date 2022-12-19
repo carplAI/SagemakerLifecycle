@@ -257,7 +257,7 @@ def output_fn(predictions, content_type):
     assert content_type == 'application/json'
     res = predictions.cpu().numpy().tolist()
     output = response_converter(res)
-    return json.dumps(res)
+    return json.dumps(output)
 
 
 def response_converter(res):
