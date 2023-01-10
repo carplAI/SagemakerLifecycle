@@ -2,3 +2,4 @@ requests
 pillow
 pydicom
 numpy
+torchsummary
