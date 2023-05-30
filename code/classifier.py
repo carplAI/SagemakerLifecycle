@@ -595,7 +595,16 @@ def response_converter(res):
                     "name":"class_B",
                     "probability":score_B
                 }
-            ]
+            ],
+            "rois":[
+                    {
+                        "finding_name":"class",
+                        "points":[
+                            [50,300],
+                            [100,200]
+                        ]
+                    }
+                ]
         }
     }
     '''
@@ -611,7 +620,20 @@ def response_converter(res):
             }
         )
 
-        return {"response" : {"findings":result}}
+        return {
+            "response" : {
+                "findings":result,
+                "rois":[
+                    {
+                        "finding_name":"class",
+                        "points":[
+                            [50,300],
+                            [100,200]
+                        ]
+                    }
+                ]
+            }
+        }
     except Exception as e:
         print(e) 
 
