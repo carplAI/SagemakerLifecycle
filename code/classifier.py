@@ -638,10 +638,23 @@ def response_converter(res):
                 "findings":result,
                 "rois":[
                     {
-                        "finding_name":"class",
+                        "finding_name":"class1",
+                        "type":"Rectangle",
                         "points":[
                             [50,300],
                             [100,200]
+                        ]
+                    },
+                    {
+                        "finding_name":"class2",
+                        "type":"Freehand",
+                        "points":[
+                            [500,300],
+                            [500,320],
+                            [500,420],
+                            [800,420],
+                            [800,370],
+                            [800,320]
                         ]
                     }
                 ]
