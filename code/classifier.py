@@ -641,8 +641,8 @@ def response_converter(res):
                         "finding_name":"class1",
                         "type":"Rectangle",
                         "points":[
-                            [50,300],
-                            [100,200]
+                            [1050,1300],
+                            [1100,1200]
                         ]
                     },
                     {
