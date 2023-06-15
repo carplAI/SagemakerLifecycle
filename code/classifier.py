@@ -1,5 +1,34 @@
 import argparse
 import json
+import os
+import numpy as np
+import time
+import sys
+import csv
+import cv2
+import matplotlib.pyplot as plt
+
+import torch
+import torch.nn as nn
+import torch.backends.cudnn as cudnn
+import torchvision
+import torchvision.transforms as transforms
+import torch.optim as optim
+import torch.nn.functional as tfunc
+from torch.utils.data import Dataset
+from torch.utils.data.dataset import random_split
+from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from PIL import Image
+import torch.nn.functional as func
+
+from sklearn.metrics import roc_auc_score
+import sklearn.metrics as metrics
+import random
+import pandas as pd
+from copy import deepcopy
+import argparse
+import json
 import logging
 import os
 import sys
@@ -19,291 +48,485 @@ import numpy as np
 import pandas as pd
 import shlex, subprocess
 from torchsummary import summary
-# def install(package):
-#     os.system("pip install " +  package)
-    
-# install('pillow')
-# install('requests')
-# install('pydicom')
 from PIL import Image
 import requests
 import pydicom
+import glob
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
+class_names = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 
+                'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 
+                'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices']
 
-def train(model,
-          criterion,
-          optimizer,
-          train_loader,
-          valid_loader,
-          save_file_name,
-          max_epochs_stop=3,
-          n_epochs=20,
-          print_every=2,
-          train_on_gpu=False):
-    """Train a PyTorch Model
+nnClassCount = 14 
 
-    Params
-    --------
-        model (PyTorch model): cnn to train
-        criterion (PyTorch loss): objective to minimize
-        optimizer (PyTorch optimizier): optimizer to compute gradients of model parameters
-        train_loader (PyTorch dataloader): training dataloader to iterate through
-        valid_loader (PyTorch dataloader): validation dataloader used for early stopping
-        save_file_name (str ending in '.pt'): file path to save the model state dict
-        max_epochs_stop (int): maximum number of epochs with no improvement in validation loss for early stopping
-        n_epochs (int): maximum number of training epochs
-        print_every (int): frequency of epochs to print training stats
-
-    Returns
-    --------
-        model (PyTorch model): trained cnn with best weights
-        history (DataFrame): history of train and validation loss and accuracy
-    """
-
-    # Early stopping intialization
-    epochs_no_improve = 0
-    valid_loss_min = np.Inf
-
-    valid_max_acc = 0
-    history = []
-
-    # Number of epochs already trained (if using loaded in model weights)
-    try:
-        print(f'Model has been trained for: {model.epochs} epochs.\n')
-    except Exception:
-        model.epochs = 0
-        print(f'Starting Training from Scratch.\n')
-
-    overall_start = timer()
-
-    # Main loop
-    for epoch in range(n_epochs):
-
-        # keep track of training and validation loss each epoch
-        train_loss = 0.0
-        valid_loss = 0.0
-
-        train_acc = 0
-        valid_acc = 0
-
-        # Set to training
-        model.train()
-        start = timer()
-
-        for ii, (data, target) in enumerate(train_loader):
-            # Tensors to gpu
-            if train_on_gpu:
-                data, target = data.cuda(), target.cuda()
-
-            # Clear gradients
-            optimizer.zero_grad()
-            # Predicted outputs are log probabilities
-            output = model(data)
-
-            # Loss and backpropagation of gradients
-            loss = criterion(output, target)
-            loss.backward()
-
-            # Update the parameters
-            optimizer.step()
-
-            # Track train loss by multiplying average loss by number of examples in batch
-            train_loss += loss.item() * data.size(0)
-
-            # Calculate accuracy by finding max log probability
-            _, pred = torch.max(output, dim=1)
-            correct_tensor = pred.eq(target.data.view_as(pred))
-            correct = (
-                np.squeeze(correct_tensor.cpu().numpy())
-                if train_on_gpu
-                else np.squeeze(correct_tensor.numpy())
-            )
-            # calculate test accuracy for each object class
-            '''for i in range(batch_size):       
-                label = target.data[i]
-                class_correct[label] += correct[i].item()
-                class_total[label] += 1'''
-
-            # Need to convert correct tensor from int to float to average
-            accuracy = torch.mean(correct_tensor.type(torch.FloatTensor))
-            # Multiply average accuracy times the number of examples in batch
-            train_acc += accuracy.item() * data.size(0)
-
-            # Track training progress
-            print(
-                f'Epoch: {epoch}\t{100 * (ii + 1) / len(train_loader):.2f}% complete. {timer() - start:.2f} seconds elapsed in epoch.',
-                end='\r')
-
-        model.epochs += 1
-
-        # Don't need to keep track of gradients
-        with torch.no_grad():
-            # Set to evaluation mode
-            model.eval()
-
-            # Validation loop
-            for data, target in valid_loader:
-                # Tensors to gpu
-                if train_on_gpu:
-                    data, target = data.cuda(), target.cuda()
-
-                # Forward pass
-                output = model(data)
-
-                # Validation loss
-                loss = criterion(output, target)
-                # Multiply average loss times the number of examples in batch
-                valid_loss += loss.item() * data.size(0)
-
-                # Calculate validation accuracy
-                _, pred = torch.max(output, dim=1)
-                correct_tensor = pred.eq(target.data.view_as(pred))
-                accuracy = torch.mean(
-                    correct_tensor.type(torch.FloatTensor))
-                # Multiply average accuracy times the number of examples
-                valid_acc += accuracy.item() * data.size(0)
-
-            # Calculate average losses
-            train_loss = train_loss / len(train_loader.dataset)
-            valid_loss = valid_loss / len(valid_loader.dataset)
-
-            # Calculate average accuracy
-            train_acc = train_acc / len(train_loader.dataset)
-            valid_acc = valid_acc / len(valid_loader.dataset)
-
-            history.append([train_loss, valid_loss, train_acc, valid_acc])
-
-            # Print training and validation results
-            if (epoch + 1) % print_every == 0:
-                print(
-                    f'\nEpoch: {epoch} \tTraining Loss: {train_loss:.4f} \tValidation Loss: {valid_loss:.4f}'
-                )
-                print(
-                    f'\t\tTraining Accuracy: {100 * train_acc:.2f}%\t Validation Accuracy: {100 * valid_acc:.2f}%'
-                )
-
-            # Save the model if validation loss decreases
-            if valid_loss < valid_loss_min:
-                # Save model
-                torch.save(model.state_dict(), save_file_name)
-                # Track improvement
-                epochs_no_improve = 0
-                valid_loss_min = valid_loss
-                valid_best_acc = valid_acc
-                best_epoch = epoch
-
-            # Otherwise increment count of epochs with no improvement
-            else:
-                epochs_no_improve += 1
-                # Trigger early stopping
-                if epochs_no_improve >= max_epochs_stop:
-                    print(
-                        f'\nEarly Stopping! Total epochs: {epoch}. Best epoch: {best_epoch} with loss: {valid_loss_min:.2f} and acc: {100 * valid_acc:.2f}%'
-                    )
-                    total_time = timer() - overall_start
-                    print(
-                        f'{total_time:.2f} total seconds elapsed. {total_time / (epoch+1):.2f} seconds per epoch.'
-                    )
-
-                    # Load the best state dict
-                    model.load_state_dict(torch.load(save_file_name))
-                    # Attach the optimizer
-                    model.optimizer = optimizer
-
-                    # Format history
-                    history = pd.DataFrame(
-                        history,
-                        columns=[
-                            'train_loss', 'valid_loss', 'train_acc',
-                            'valid_acc'
-                        ])
-                    return model, history
-
-    # Attach the optimizer
-    model.optimizer = optimizer
-    # Record overall time and print out stats
-    total_time = timer() - overall_start
-#     print(
-#         f'\nBest epoch: {best_epoch} with loss: {valid_loss_min:.2f} and acc: {100 * valid_acc:.2f}%'
-#     )
-#     print(
-#         f'{total_time:.2f} total seconds elapsed. {total_time / (epoch):.2f} seconds per epoch.'
-#     )
-    # Format history
-    history = pd.DataFrame(
-        history,
-        columns=['train_loss', 'valid_loss', 'train_acc', 'valid_acc'])
-    return model, history
+def find_file_path(filename):
+    file_path = None
+    for path in glob.glob('**/' + filename, recursive=True):
+        if file_path is None:
+            file_path = os.path.abspath(path)
+            break
+    return file_path
 
 
-def save_checkpoint(model, path, multi_gpu):
-    """Save a PyTorch model checkpoint
+''' INFERENCING'''
+def get_json(coord,og_img_size):
+    final_coord = [[coord[x]*(og_img_size[0]/224),coord[y]*(og_img_size[1]/224)] for x,y in zip(list(range(0,len(coord),2)),list(range(1,len(coord),2)))]
+    #final_coord = np.array(final_coord)
+    return(final_coord)
 
-    Params
-    --------
-        model (PyTorch model): model to save
-        path (str): location to save model. Must start with `model_name-` and end in '.pth'
+def get_coord_dict(cont_new):
+    final_pairs = get_pairs(cont_new)
+    line_list = []
+    for i in range(0,len(final_pairs)):
+        coord_cur,coord_after = final_pairs[i][0],final_pairs[i][1]
+        z = {'active':True,
+        'highlight': True,
+        'lines': [{'x': coord_after[0], 'y': coord_after[1]}],
+        'x': coord_cur[0],
+        'y': coord_cur[1]}
+        line_list.append(z)
+    return line_list
 
-    Returns
-    --------
-        None, save the `model` to `path`
+def get_1D_coord(contours):
+    global_list=[]
+    for contour_id in range(len(contours)):
+        local_list=[]
+        for point_idx in range(contours[contour_id].shape[0]):
+            if(point_idx==0):
+                X_0= contours[contour_id][point_idx][0][0].astype('float')
+                Y_0 = contours[contour_id][point_idx][0][1].astype('float')
+            X = contours[contour_id][point_idx][0][0].astype('float')
+            Y = contours[contour_id][point_idx][0][1].astype('float')
+            local_list.append(X)
+            local_list.append(Y)
+            # If the last point is reached, then append the first point
+            if(point_idx == contours[contour_id].shape[0]-1):
+                local_list.append(X_0)
+                local_list.append(Y_0)
+        global_list.append(deepcopy(local_list))
+    return(global_list)
 
-    """
+def threshold(minimum,maximum,image,binary=True):
+    if(binary): # If binary is True, then the image is converted to binary
+        image[image<minimum]=0
+        image[image>maximum]=0
+        image[(image>0)]=1
+    else: # If binary is False, then the image is converted to grayscale
+        image[image<minimum]=0
+        image[image>maximum]=0
+    return image
 
-    model_name = path.split('-')[0]
-    assert (model_name in ['vgg16', 'resnet50'
-                           ]), "Path must have the correct model name"
-
-    # Basic details
-    checkpoint = {
-        'class_to_idx': model.class_to_idx,
-        'idx_to_class': model.idx_to_class,
-        'epochs': model.epochs,
-    }
-
-    # Extract the final classifier and the state dictionary
-    if model_name == 'vgg16':
-        # Check to see if model was parallelized
-        if multi_gpu:
-            checkpoint['classifier'] = model.module.classifier
-            checkpoint['state_dict'] = model.module.state_dict()
+def get_pairs(cont_new):
+    pairs=[]
+    for i in range(0,cont_new.shape[0]):
+        if (i < (cont_new.shape[0]-1)):
+            pairs.append((cont_new[i],cont_new[i+1]))
         else:
-            checkpoint['classifier'] = model.classifier
-            checkpoint['state_dict'] = model.state_dict()
+            pairs.append((cont_new[i],cont_new[0]))
+    return(pairs)
 
-    elif model_name == 'resnet50':
-        if multi_gpu:
-            checkpoint['fc'] = model.module.fc
-            checkpoint['state_dict'] = model.module.state_dict()
-        else:
-            checkpoint['fc'] = model.fc
-            checkpoint['state_dict'] = model.state_dict()
+def model_fn(model_dir):
+    model = DenseNet121(nnClassCount)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    f = "model.pth"
+    print(">>>>>>>>>>>>>>> model dir >>>>>>>>")
+    print(model_dir)
+    model_def_path = os.path.join(model_dir, "model.pth")
+    if not os.path.isfile(model_def_path):
+        print(f"file not found in {model_def_path}")
+        raise RuntimeError("Missing the model definition file")
+    model = torch.nn.DataParallel(model)
+    modelCheckpoint = torch.load(model_def_path)
+    model.load_state_dict(modelCheckpoint['state_dict'])
+    model.eval()
+    return model.to(device)
 
-    # Add the optimizer
-    checkpoint['optimizer'] = model.optimizer
-    checkpoint['optimizer_state_dict'] = model.optimizer.state_dict()
+def save_model(model, model_dir):
+    logger.info("Saving the model.")
+    path = os.path.join(model_dir, "model.pth")
+    torch.save(model, path)
 
-    # Save the data to the path
-    torch.save(checkpoint, path)
-
-
+def input_fn(request_body, content_type='application/json'):
+    logger.info('Deserializing the input data.')
+    import requests
+    import numpy as np
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if content_type == 'application/json':    
+        input_data = json.loads(request_body)
+        url = input_data['url']
+        logger.info(f'Image url: {url}')
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        image_data = Image.open(requests.get(url, stream=True).raw).convert('RGB')
+        image_transform = transforms.Compose([
+            transforms.Resize(size=256),
+            transforms.CenterCrop(size=224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        ])
+        data = image_transform(image_data)
+        logger.info(str(data.shape))
+        data = torch.tensor(data, dtype=torch.float32, device=device).unsqueeze(0)
+        logger.info(str(data.shape))
+        return [data, image_data.size]
+    raise Exception(f'Requested unsupported ContentType in content_type {content_type}')
     
+def predict_fn(input_object, model):
+    input_object, og_img_size = input_object
+    with torch.no_grad():
+        logger.info(str(input_object.shape))
+        # logger.info(model.classifier)
+        output = model.module.densenet121.features(input_object)
+        l = model(input_object)
+        heatmap = None
+        weights = list(model.module.densenet121.features.parameters())[-2]
+        for i in range (0, len(weights)):
+            map = output[0,i,:,:]
+            if i == 0: 
+                heatmap = weights[i] * map
+            else: 
+                heatmap += weights[i] * map
+            npHeatmap = heatmap.cpu().data.numpy()
+    return [output,l,npHeatmap, og_img_size]
+
+def output_fn(predictions, content_type):
+    assert content_type == 'application/json'
+    output,l,npHeatmap,og_img_size = predictions
+    cam = npHeatmap / np.max(npHeatmap)
+    cam = cv2.resize(cam, (224, 224))
+    heatmap = cv2.applyColorMap(np.uint8(255*cam), cv2.COLORMAP_JET)
+    #---- Blend original and heatmap 
+    temp = heatmap.copy()
+    img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
+    print(img.min())
+    img = (img/1).astype('uint8')
+    binary = threshold(200,255,img)
+    binary = binary.astype(np.int32)
+    contours, _ = cv2.findContours(binary,cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE) 
+    # multi_data = []
+    # multidata_dict={}
+    # path_roi = find_file_path("ROIFormat.txt")
+    # with open(path_roi) as json_file:
+    #     data_orig = json.load(json_file)
+    coords = get_1D_coord(contours)
+    data_final = []
+    for coord in coords:
+        data_final.append(get_json(coord,og_img_size))
+        
+    print("FINAL JSON")
+    output = response_converter(l.tolist(),data_final)
+    return json.dumps(output)
+
+def response_converter(labels,coords):
+    print(labels,coords)
+    '''
+    THIS IS A CUSTOM RESPONSE CCONVERTER
+    CARPL EXPECTS OUTPUT IN THIS FORMAT:
+    {
+        "response": {
+            "findings":[
+                {
+                    "name":"class_A",
+                    "probability":score_A
+                },
+                {
+                    "name":"class_B",
+                    "probability":score_B
+                }
+            ],
+            "rois":[
+                    {
+                        "finding_name":"class1",
+                        "type":"Rectangle",
+                        "points":[
+                            [50,300],
+                            [100,200]
+                        ]
+                    },
+                    {
+                        "finding_name":"class2",
+                        "type":"Freehand",
+                        "points":[
+                            [500,300],
+                            [500,320],
+                            [500,420],
+                            [800,420],
+                            [800,370],
+                            [800,320]
+                        ]
+                    }
+                ]
+        }
+    }
+    '''
+    import numpy as np
+    try:
+
+        return {
+            
+            "response" : {
+                "findings":[{
+                    "name":str(e),
+                    "probability":l
+                } for e,l in enumerate(labels[0])],
+                "rois":[
+                    {
+                    "finding_name":str(e),
+                    "type":"Freehand",
+                    "points":coords[e],
+                    } for e,l in enumerate(coords)
+                ]
+            }
+        }
+    except Exception as e:
+        print(e)
 
 
+
+class CheXpertDataSet(Dataset):
+    def __init__(self, image_list_file, transform=None, policy="ones"):
+        """
+        image_list_file: path to the file containing images with corresponding labels.
+        transform: optional transform to be applied on a sample.
+        Upolicy: name the policy with regard to the uncertain labels
+        """
+        import glob
+        image_names = glob.glob(image_list_file+"/*/*.png",recursive = True )
+                    
+        labels = np.ones((len(image_names),nnClassCount))
+        self.image_names = image_names
+        self.labels = labels
+        self.transform = transform
+
+    def __getitem__(self, index):
+        """Take the index of item and returns the image and its labels"""
+        
+        image_name = self.image_names[index]
+        image = Image.open(image_name).convert('RGB')
+        label = self.labels[index]
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, torch.FloatTensor(label)
+
+    def __len__(self):
+        return len(self.image_names)
+
+class CheXpertTrainer():
+
+    def train (model, dataLoaderTrain, dataLoaderVal, nnClassCount, trMaxEpoch, launchTimestamp, checkpoint, save_path):
+        
+        #SETTINGS: OPTIMIZER & SCHEDULER
+        optimizer = optim.Adam (model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
+                
+        #SETTINGS: LOSS
+        loss = torch.nn.BCELoss(size_average = True)
+        
+        #LOAD CHECKPOINT 
+        use_gpu = torch.cuda.is_available()
+        if checkpoint != None and use_gpu:
+            modelCheckpoint = torch.load(checkpoint)
+            model.load_state_dict(modelCheckpoint['state_dict'])
+            optimizer.load_state_dict(modelCheckpoint['optimizer'])
+
+        
+        #TRAIN THE NETWORK
+        lossMIN = 100000
+        
+        for epochID in range(0, trMaxEpoch):
+            
+            timestampTime = time.strftime("%H%M%S")
+            timestampDate = time.strftime("%d%m%Y")
+            timestampSTART = timestampDate + '-' + timestampTime
+            
+            batchs, losst, losse = CheXpertTrainer.epochTrain(model, dataLoaderTrain, dataLoaderVal, optimizer, trMaxEpoch, nnClassCount, loss)
+            lossVal = CheXpertTrainer.epochVal(model, dataLoaderVal, optimizer, trMaxEpoch, nnClassCount, loss)
+
+
+            timestampTime = time.strftime("%H%M%S")
+            timestampDate = time.strftime("%d%m%Y")
+            timestampEND = timestampDate + '-' + timestampTime
+            
+            if lossVal < lossMIN:
+                lossMIN = lossVal    
+                torch.save({'epoch': epochID + 1, 'state_dict': model.state_dict(), 'best_loss': lossMIN, 'optimizer' : optimizer.state_dict()}, save_path +  "/model.pth")
+                print ('Epoch [' + str(epochID + 1) + '] [save] [' + timestampEND + '] loss= ' + str(lossVal))
+                # save_model(model, save_path)
+            else:
+                print ('Epoch [' + str(epochID + 1) + '] [----] [' + timestampEND + '] loss= ' + str(lossVal))
+        
+        return batchs, losst, losse        
+    #-------------------------------------------------------------------------------- 
+       
+    def epochTrain(model, dataLoaderTrain, dataLoaderVal, optimizer, trMaxEpoch, classCount, loss):
+        
+        batch = []
+        losstrain = []
+        losseval = []
+        
+        model.train()
+
+        for batchID, (varInput, target) in enumerate(dataLoaderTrain):
+            use_gpu = torch.cuda.is_available()
+            if use_gpu:
+                varTarget = target.cuda(non_blocking = True)
+            else:
+                varTarget = target
+            #varTarget = target.cuda()         
+
+
+            varOutput = model(varInput)
+            lossvalue = loss(varOutput, varTarget)
+                       
+            optimizer.zero_grad()
+            lossvalue.backward()
+            optimizer.step()
+            
+            l = lossvalue.item()
+            losstrain.append(l)
+            
+            if batchID%35==0:
+                print(batchID//35, "% batches computed")
+                #Fill three arrays to see the evolution of the loss
+
+
+                batch.append(batchID)
+                
+                le = CheXpertTrainer.epochVal(model, dataLoaderVal, optimizer, trMaxEpoch, classCount, loss).item()
+                losseval.append(le)
+                
+                print(batchID)
+                print(l)
+                print(le)
+                
+        return batch, losstrain, losseval
+    
+    #-------------------------------------------------------------------------------- 
+    
+    def epochVal(model, dataLoaderVal, optimizer, epochMax, classCount, loss):
+        
+        model.eval()
+        
+        lossVal = 0
+        lossValNorm = 0
+
+        with torch.no_grad():
+            for i, (varInput, target) in enumerate(dataLoaderVal):
+                use_gpu = torch.cuda.is_available()
+                if use_gpu:
+                    target = target.cuda(non_blocking = True)
+                else:
+                    target = target
+                    
+                varOutput = model(varInput)
+                
+                losstensor = loss(varOutput, target)
+                lossVal += losstensor
+                lossValNorm += 1
+                
+        outLoss = lossVal / lossValNorm
+        return outLoss
+    
+    
+    #--------------------------------------------------------------------------------     
+     
+    #---- Computes area under ROC curve 
+    #---- dataGT - ground truth data
+    #---- dataPRED - predicted data
+    #---- classCount - number of classes
+    
+    def computeAUROC (dataGT, dataPRED, classCount):
+        
+        outAUROC = []
+        
+        datanpGT = dataGT.cpu().numpy()
+        datanpPRED = dataPRED.cpu().numpy()
+        
+        for i in range(classCount):
+            try:
+                outAUROC.append(roc_auc_score(datanpGT[:, i], datanpPRED[:, i]))
+            except ValueError:
+                pass
+        return outAUROC
+        
+        
+    #-------------------------------------------------------------------------------- 
+    
+    
+    def test(model, dataLoaderTest, nnClassCount, checkpoint, class_names):   
+        
+        cudnn.benchmark = True
+        use_gpu = torch.cuda.is_available()
+        
+        if checkpoint != None and use_gpu:
+            modelCheckpoint = torch.load(checkpoint)
+            model.load_state_dict(modelCheckpoint['state_dict'])
+
+        if use_gpu:
+            outGT = torch.FloatTensor().cuda()
+            outPRED = torch.FloatTensor().cuda()
+        else:
+            outGT = torch.FloatTensor()
+            outPRED = torch.FloatTensor()
+       
+        model.eval()
+        
+        with torch.no_grad():
+            for i, (input, target) in enumerate(dataLoaderTest):
+                use_gpu = torch.cuda.is_available()
+                if use_gpu:
+                    target = target.cuda()
+                    outGT = torch.cat((outGT, target), 0).cuda()
+                else:
+                    target = target
+                    outGT = torch.cat((outGT, target), 0)
+                    
+
+                bs, c, h, w = input.size()
+                varInput = input.view(-1, c, h, w)
+            
+                out = model(varInput)
+                outPRED = torch.cat((outPRED, out), 0)
+        aurocIndividual = CheXpertTrainer.computeAUROC(outGT, outPRED, nnClassCount)
+        aurocMean = np.array(aurocIndividual).mean()
+        
+        print ('AUROC mean ', aurocMean)
+        
+        for i in range (0, len(aurocIndividual)):
+            print (class_names[i], ' ', aurocIndividual[i])
+        
+        return outGT, outPRED
+    
+class DenseNet121(nn.Module):
+    """Model modified.
+    The architecture of our model is the same as standard DenseNet121
+    except the classifier layer which has an additional sigmoid function.
+    """
+    def __init__(self, out_size):
+        super(DenseNet121, self).__init__()
+        self.densenet121 = torchvision.models.densenet121(pretrained=True)
+        num_ftrs = self.densenet121.classifier.in_features
+        self.densenet121.classifier = nn.Sequential(
+            nn.Linear(num_ftrs, out_size),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        x = self.densenet121(x)
+        return x
+    
 def create_dataloader(traindir,testdir,validdir,batch_size=128):
+
     image_transforms = {
     # Train uses data augmentation
     'train':
+        
     transforms.Compose([
-        transforms.RandomResizedCrop(size=256, scale=(0.8, 1.0)),
-        transforms.RandomRotation(degrees=15),
-        transforms.ColorJitter(),
-        transforms.RandomHorizontalFlip(),
-        transforms.CenterCrop(size=224),  # Image net standards
+        transforms.Resize(size=256),
+        transforms.CenterCrop(size=224), 
+        # transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406],
                              [0.229, 0.224, 0.225])  # Imagenet standards
@@ -348,12 +571,6 @@ def create_dataloader(traindir,testdir,validdir,batch_size=128):
     
     return data,dataloaders
 
-def create_models():
-    model = models.vgg16(pretrained=True)
-    for param in model.parameters():
-        param.requires_grad = False
-        
-    return model
         
 def preops(traindir,testdir,validdir):
     print("********* inside preops *************")
@@ -405,402 +622,183 @@ def preops(traindir,testdir,validdir):
     
     return cat_df
 
-def get_pretrained_model(model_name,n_classes):
-    """Retrieve a pre-trained model from torchvision
+class HeatmapGenerator():
+    def __init__ (self, pathModel=None, nnClassCount=14, transCrop=224):
+        # model = DenseNet121(nnClassCount)
+        use_gpu = None
+        
+        if use_gpu:
+            model = torch.nn.DataParallel(model)
+        else:
+            model = torch.nn.DataParallel(model)
+        
+        model = torch.load(pathModel)
+        # model.load_state_dict(modelCheckpoint['state_dict'])
 
-    Params
-    -------
-        model_name (str): name of the model (currently only accepts vgg16 and resnet50)
+        self.model = model
+        self.model.eval()
+        
+        #---- Initialize the weights
+        self.weights = list(self.model.module.densenet121.features.parameters())[-2]
 
-    Return
-    --------
-        model (PyTorch model): cnn
-
-    """
-
-    if model_name == 'vgg16':
-        model = models.vgg16(pretrained=True)
-
-        # Freeze early layers
-        for param in model.parameters():
-            param.requires_grad = False
-        n_inputs = model.classifier[6].in_features
-
-        # Add on classifier
-        model.classifier[6] = nn.Sequential(
-            nn.Linear(n_inputs, 256), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(256, n_classes), nn.LogSoftmax(dim=1))
-
-    elif model_name == 'resnet50':
-        model = models.resnet50(pretrained=True)
-
-        for param in model.parameters():
-            param.requires_grad = False
-
-        n_inputs = model.fc.in_features
-        model.fc = nn.Sequential(
-            nn.Linear(n_inputs, 256), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(256, n_classes), nn.LogSoftmax(dim=1))
-
-    return model
-
-def save_model(model, model_dir):
-    logger.info("Saving the model.")
-    path = os.path.join(model_dir, "model.pth")
-    # recommended way from http://pytorch.org/docs/master/notes/serialization.html
-    torch.save(model, path)
-
-def load_checkpoint(path,multi_gpu):
-    """Load a PyTorch model checkpoint
-
-    Params
-    --------
-        path (str): saved model checkpoint. Must start with `model_name-` and end in '.pth'
-
-    Returns
-    --------
-        None, save the `model` to `path`
-
-    """
-
-    # Get the model name
-    model_name = path.split('-')[0]
-    assert (model_name in ['vgg16', 'resnet50'
-                           ]), "Path must have the correct model name"
-
-    # Load in checkpoint
-    checkpoint = torch.load(path)
-
-    if model_name == 'vgg16':
-        model = models.vgg16(pretrained=True)
-        # Make sure to set parameters as not trainable
-        for param in model.parameters():
-            param.requires_grad = False
-        model.classifier = checkpoint['classifier']
-
-    elif model_name == 'resnet50':
-        model = models.resnet50(pretrained=True)
-        # Make sure to set parameters as not trainable
-        for param in model.parameters():
-            param.requires_grad = False
-        model.fc = checkpoint['fc']
-
-    # Load in the state dict
-    model.load_state_dict(checkpoint['state_dict'])
-
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f'{total_params:,} total parameters.')
-    total_trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'{total_trainable_params:,} total gradient parameters.')
-
-    # Move to gpu
-    if multi_gpu:
-        model = nn.DataParallel(model)
-
-    # if train_on_gpu:
-    #     model = model.to('cuda')
-
-    # Model basics
-    model.class_to_idx = checkpoint['class_to_idx']
-    model.idx_to_class = checkpoint['idx_to_class']
-    model.epochs = checkpoint['epochs']
-
-    # Optimizer
-    optimizer = checkpoint['optimizer']
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-    return model, optimizer
-# model, optimizer = load_checkpoint(path=checkpoint_path)
-
-# if multi_gpu:
-#     summary(model.module, input_size=(3, 224, 224), batch_size=batch_size)
-# else:
-#     summary(model, input_size=(3, 224, 224), batch_size=batch_size)
-
-
-'''
-inferencing
-'''
-
-def model_fn(model_dir):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # model = torch.nn.DataParallel(Net())
-    # with open(os.path.join(model_dir, "model.pth"), "rb") as f:
-    #     model.load_state_dict(torch.load(f))
-    f = "model.pth"
-    model = torch.load(os.path.join(model_dir, "model.pth"))
-    model.eval()
-    return model.to(device)
-
-
-def input_fn(request_body, content_type='application/json'):
-    # sourcery skip: raise-specific-error
-    logger.info('Deserializing the input data.')
-    import requests
-    import numpy as np
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if content_type == 'application/json':
-        # request_body = json.dumps({"url":"http://rasbt.github.io/mlxtend/user_guide/data/mnist_data_files/mnist_data_10_0.png"})    
-        input_data = json.loads(request_body)
-        url = input_data['url']
-        logger.info(f'Image url: {url}')
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        # resp = requests.get(url, stream=True)
-        # raw_data = resp.raw
-        image_data = Image.open(requests.get(url, stream=True).raw).convert('RGB')
-
-        image_transform = transforms.Compose([
-            transforms.Resize(size=256),
-            transforms.CenterCrop(size=224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
-        # logger.info(image_data)
-        data = image_transform(image_data)
-        logger.info(str(data.shape))
-        data = torch.tensor(data, dtype=torch.float32, device=device).unsqueeze(0)
-        logger.info(str(data.shape))
-        return data
-    raise Exception(f'Requested unsupported ContentType in content_type {content_type}')
-
-def predict_fn(input_object, model):
-    with torch.no_grad():
-        logger.info(str(input_object.shape))
-        logger.info(model.classifier)
-        prediction = model(input_object)
-
-    return prediction
-
-def output_fn(predictions, content_type):
-    assert content_type == 'application/json'
-    finding = torch.exp(torch.tensor(predictions))
-    res = finding.numpy().tolist()[0][1] * 100
-    output = response_converter(res)
-    return json.dumps(output)
-
-
-def response_converter(res):
-    '''
-    THIS IS A CUSTOM RESPONSE CCONVERTER
-    CARPL EXPECTS OUTPUT IN THIS FORMAT:
-    {
-        "response": {
-            "findings":[
-                {
-                    "name":"class_A",
-                    "probability":score_A
-                },
-                {
-                    "name":"class_B",
-                    "probability":score_B
-                }
-            ],
-            "rois":[
-                    {
-                        "finding_name":"class1",
-                        "type":"Rectangle",
-                        "points":[
-                            [50,300],
-                            [100,200]
-                        ]
-                    },
-                    {
-                        "finding_name":"class2",
-                        "type":"Freehand",
-                        "points":[
-                            [500,300],
-                            [500,320],
-                            [500,420],
-                            [800,420],
-                            [800,370],
-                            [800,320]
-                        ]
-                    }
-                ]
-        }
-    }
-    '''
-    import numpy as np
-    try:
-
-        result = []
-        # for e,val in enumerate(res[0]):
-        result.append(
-            {
-                "name":"class",
-                "probability":int(res)
-            }
-        )
-
-        return {
-            "response" : {
-                "findings":result,
-                "rois":[
-                    {
-                        "finding_name":"class1",
-                        "type":"Rectangle",
-                        "points":[
-                            [1050,1300],
-                            [1100,1200]
-                        ]
-                    },
-                    {
-                        "finding_name":"class2",
-                        "type":"Freehand",
-                        "points":[
-                            [900,1300],
-                            [900,1320],
-                            [900,1420],
-                            [1300,1420],
-                            [1300,1370],
-                            [1300,1320]
-                        ]
-                    }
-                ]
-            }
-        }
-    except Exception as e:
-        print(e) 
-
-
+        #---- Initialize the image transform
+        normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transformList = []
+        transformList.append(transforms.Resize((transCrop, transCrop)))
+        transformList.append(transforms.ToTensor())
+        transformList.append(normalize)  
+        self.transformSequence = transforms.Compose(transformList)
+    
+    #--------------------------------------------------------------------------------
+     
+    def generate (self, pathImageFile, pathOutputFile, transCrop):
+        
+        #---- Load image, transform, convert 
+        with torch.no_grad():
+            use_gpu = None
+ 
+            imageData = Image.open(pathImageFile).convert('RGB')
+            imageData = self.transformSequence(imageData)
+            imageData = imageData.unsqueeze_(0)
+            if use_gpu:
+                imageData = imageData
+            l = self.model(imageData)
+            output = self.model.module.densenet121.features(imageData)
+            label = class_names[torch.max(l,1)[1]]
+            #---- Generate heatmap
+            heatmap = None
+            for i in range (0, len(self.weights)):
+                map = output[0,i,:,:]
+                if i == 0: heatmap = self.weights[i] * map
+                else: heatmap += self.weights[i] * map
+                npHeatmap = heatmap.cpu().data.numpy()
+        cam = npHeatmap / np.max(npHeatmap)
+        cam = cv2.resize(cam, (transCrop, transCrop))
+        heatmap = cv2.applyColorMap(np.uint8(255*cam), cv2.COLORMAP_JET)
+        #---- Blend original and heatmap 
+        temp = heatmap.copy()
+        img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
+        print(img.min())
+        # print(img.shape)
+        img = (img/1).astype('uint8')
+        binary = threshold(200,255,img)
+        binary = binary.astype(np.int32)
+        contours, _ = cv2.findContours(binary,cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE) 
+        multi_data = []
+        multidata_dict={}
+        with open("ROIFormat.txt") as json_file:
+            data_orig = json.load(json_file)
+        coords = get_1D_coord(contours)
+        for coord in coords:
+            data_final = get_json(data = data_orig, coord=coord)
+            multi_data.append(deepcopy(data_final['allTools'][0]))
+        multidata_dict['allTools'] = multi_data
+        
+        print("FINAL JSON")
+        print(multidata_dict)
+        
+#         imgOriginal = cv2.imread(pathImageFile, 1)
+#         imgOriginal = cv2.resize(imgOriginal, (transCrop, transCrop))
+        
+        
+        
+#         img = cv2.addWeighted(imgOriginal,1,heatmap,0.35,0)            
+#         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+#         plt.title(label)
+#         plt.imshow(img)
+#         plt.plot()
+#         plt.axis('off')
+#         plt.savefig(pathOutputFile)
+#         plt.show()
 
 def run(args):
-
-    is_distributed = len(args.hosts) > 1 and args.backend is not None
-
-    # datadir = '/opt/ml/xray-nano/nano'
+    batch_size = 128
     traindir = args.data_dir_train + "/" #datadir + '/train/'
     validdir = args.data_dir_val + "/" #datadir + '/val/'
     testdir = args.data_dir_test + "/" #datadir + '/test/'
-    # print(os.listdir(datadir))
-    print("********* inside run *************")
-    print(f"{traindir} , {testdir} , {validdir}")
-
-    save_file_name = 'vgg16-chest-4.pt'
-    checkpoint_path = 'vgg16-chest-4.pth'
-
-    # Change to fit hardware
-    batch_size = 128
-    # Whether to train on a gpu
-
-    use_cuda = args.num_gpus > 0
-    logger.debug(f"Number of gpus available - {args.num_gpus}")
-    kwargs = {"num_workers": 1, "pin_memory": True} if use_cuda else {}
-    device = torch.device("cuda" if use_cuda else "cpu")
-
-    # train_on_gpu = cuda.is_available()
-    # print(f'Train on gpu: {train_on_gpu}')
-
-    train_on_gpu = use_cuda
-
-    # # Number of gpus
-    # if train_on_gpu:
-    #     gpu_count = cuda.device_count()
-    #     print(f'{gpu_count} gpus detected.')
-    #     if gpu_count > 1:
-    #         multi_gpu = True
-    #     else:
-    #         multi_gpu = False
-
-    # set the seed for generating random numbers
-    torch.manual_seed(args.seed)
-    if use_cuda:
-        torch.cuda.manual_seed(args.seed)
-
-    cat_df = preops(traindir,testdir,validdir)
-
-    data,dataloaders = create_dataloader(traindir,testdir,validdir,batch_size)
-
-    trainiter = iter(dataloaders['train'])
-    features, labels = next(trainiter)
-    print(features.shape, labels.shape)
-
-    n_classes = len(cat_df)
-    print(f'There are {n_classes} different classes.')
-
-    print(len(data['train'].classes))
-    #train_loader = _get_train_data_loader(args.batch_size, args.data_dir, is_distributed, **kwargs)
-    #test_loader = _get_test_data_loader(args.test_batch_size, args.data_dir, **kwargs)
-
-    model = create_models()
-    n_inputs = model.classifier[6].in_features
-
-    # Add on classifier
-    model.classifier[6] = nn.Sequential(
-        nn.Linear(n_inputs, 256), nn.ReLU(), nn.Dropout(0.4),
-        nn.Linear(256, n_classes), nn.LogSoftmax(dim=1))
-
-    model.classifier
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f'{total_params:,} total parameters.')
-    total_trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad)
-    print(f'{total_trainable_params:,} training parameters.')
-
-    # if train_on_gpu:
-    #     model = model.to('cuda')
-
-    if is_distributed and use_cuda:
-        # multi-machine multi-gpu case
-        model = torch.nn.parallel.DistributedDataParallel(model)
-    else:
-        # single-machine multi-gpu case or single-machine or multi-machine cpu case
-        model = torch.nn.DataParallel(model)
-
-    model = get_pretrained_model('vgg16',n_classes,)
-    if use_cuda:
-        summary(
-            model.module,
-            input_size=(3, 224, 224),
-            batch_size=batch_size,
-            device='cuda')
-    else:
-        summary(
-            model, input_size=(3, 224, 224), batch_size=batch_size, device='cuda')
-
-    model.class_to_idx = data['train'].class_to_idx
-    model.idx_to_class = {
-        idx: class_
-        for class_, idx in model.class_to_idx.items()
-    }
-
-
-    print(list(model.idx_to_class.items()))
-
-    criterion = nn.NLLLoss()
-    optimizer = optim.Adam(model.parameters())
-
-    for p in optimizer.param_groups[0]['params']:
-        if p.requires_grad:
-            print(p.shape)
-
-
-    model, history = train(
-        model,
-        criterion,
-        optimizer,
-        dataloaders['train'],
-        dataloaders['val'],
-        save_file_name=save_file_name,
-        max_epochs_stop=5,
-        n_epochs=1,
-        print_every=2,
-        train_on_gpu=train_on_gpu)
-
-    print(model,history)
-
-
-    save_file_name = 'vgg16-chest-4.pt'
-    checkpoint_path = 'vgg16-chest-4.pth'
-    # save_checkpoint(model, checkpoint_path,use_cuda)
-    save_model(model, args.model_dir)
-
     
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    use_gpu = torch.cuda.is_available()
+    pathFileTrain = args.data_dir_train
+    pathFileValid = args.data_dir_val
 
-    # Data and model checkpoints directories
+    # Neural network parameters:
+    nnIsTrained = False                 #pre-trained using ImageNet
+    nnClassCount = 14                   #dimension of the output
+
+    # Training settings: batch size, maximum number of epochs
+    trBatchSize = 64
+    trMaxEpoch = 1
+
+    # Parameters related to image transforms: size of the down-scaled image, cropped image
+    imgtransResize = (320, 320)
+    imgtransCrop = 224
+
+    # Class names
+    class_names = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 
+                'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 
+                'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices']
+    
+    #TRANSFORM DATA
+    normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transformList = []
+    #transformList.append(transforms.Resize(imgtransCrop))
+    transformList.append(transforms.RandomResizedCrop(imgtransCrop))
+    transformList.append(transforms.RandomHorizontalFlip())
+    transformList.append(transforms.ToTensor())
+    transformList.append(normalize)      
+    transformSequence=transforms.Compose(transformList)
+
+    #LOAD DATASET
+    
+    # cat_df = preops(traindir,testdir,validdir)
+    nnClassCount = len(class_names)
+    
+    
+    data,dataloaders = create_dataloader(traindir,testdir,validdir,batch_size)
+    
+    dataset = CheXpertDataSet(pathFileTrain ,transformSequence, policy="ones")
+    datasetTest, datasetTrain = random_split(dataset, [1, len(dataset) - 1])
+    datasetValid = CheXpertDataSet(pathFileValid, transformSequence)            
+    
+    
+    
+
+    # dataLoaderTrain = dataloaders["train"]#DataLoader(dataset=datasetTrain, batch_size=trBatchSize, shuffle=True,  num_workers=24, pin_memory=True)
+    # dataLoaderVal = dataloaders["val"]#DataLoader(dataset=datasetValid, batch_size=trBatchSize, shuffle=False, num_workers=24, pin_memory=True)
+    # dataLoaderTest = dataloaders["test"]#DataLoader(dataset=datasetTest, num_workers=24, pin_memory=True)
+    
+    dataLoaderTrain = DataLoader(dataset=datasetTrain, batch_size=trBatchSize, shuffle=True,  num_workers=24, pin_memory=True)
+    dataLoaderVal = DataLoader(dataset=datasetValid, batch_size=trBatchSize, shuffle=False, num_workers=24, pin_memory=True)
+    dataLoaderTest = DataLoader(dataset=datasetTest, num_workers=24, pin_memory=True)
+    
+    # initialize and load the model
+    use_gpu = torch.cuda.is_available()
+    if use_gpu:
+        model = DenseNet121(nnClassCount).cuda()
+        model = torch.nn.DataParallel(model).cuda()
+    else:
+        model = DenseNet121(nnClassCount)
+        model = torch.nn.DataParallel(model)
+        
+
+    timestampTime = time.strftime("%H%M%S")
+    timestampDate = time.strftime("%d%m%Y")
+    timestampLaunch = timestampDate + '-' + timestampTime
+    save_path = args.model_dir
+    batch, losst, losse = CheXpertTrainer.train(model, dataLoaderTrain, dataLoaderVal, nnClassCount, trMaxEpoch, timestampLaunch, None, save_path)
+    print("Model trained")
+
+    losstn = []
+    for i in range(0, len(losst), 35):
+        losstn.append(np.mean(losst[i:i+35]))
+
+    print(losstn)
+    print(losse)
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -808,6 +806,7 @@ if __name__ == "__main__":
         metavar="N",
         help="input batch size for training (default: 64)",
     )
+
     parser.add_argument(
         "--test-batch-size",
         type=int,
@@ -815,6 +814,7 @@ if __name__ == "__main__":
         metavar="N",
         help="input batch size for testing (default: 1000)",
     )
+
     parser.add_argument(
         "--epochs",
         type=int,
@@ -822,13 +822,17 @@ if __name__ == "__main__":
         metavar="N",
         help="number of epochs to train (default: 10)",
     )
+
     parser.add_argument(
         "--lr", type=float, default=0.01, metavar="LR", help="learning rate (default: 0.01)"
     )
+    
     parser.add_argument(
         "--momentum", type=float, default=0.5, metavar="M", help="SGD momentum (default: 0.5)"
     )
+   
     parser.add_argument("--seed", type=int, default=1, metavar="S", help="random seed (default: 1)")
+    
     parser.add_argument(
         "--log-interval",
         type=int,
@@ -836,6 +840,7 @@ if __name__ == "__main__":
         metavar="N",
         help="how many batches to wait before logging training status",
     )
+    
     parser.add_argument(
         "--backend",
         type=str,
@@ -843,15 +848,22 @@ if __name__ == "__main__":
         help="backend for distributed training (tcp, gloo on cpu and gloo, nccl on gpu)",
     )
 
-    # Container environment
     parser.add_argument("--hosts", type=list, default=json.loads(os.environ["SM_HOSTS"]))
+    
     parser.add_argument("--current-host", type=str, default=os.environ["SM_CURRENT_HOST"])
+    
     parser.add_argument("--model-dir", type=str, default=os.environ["SM_MODEL_DIR"])
+    
     parser.add_argument("--data-dir-train", type=str, default=os.environ["SM_CHANNEL_TRAINING"])
+    
     parser.add_argument("--data-dir-test", type=str, default=os.environ["SM_CHANNEL_TESTING"])
+    
     parser.add_argument("--data-dir-val", type=str, default=os.environ["SM_CHANNEL_VALIDATING"])
+    
     parser.add_argument("--num-gpus", type=int, default=os.environ["SM_NUM_GPUS"])
-
+    
+    args = parser.parse_args()
+    
+    run(args)
     
 
-    run(parser.parse_args())
