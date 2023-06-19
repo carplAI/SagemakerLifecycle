@@ -58,9 +58,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.addHandler(logging.StreamHandler(sys.stdout))
 
-class_names = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 
-                'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 
-                'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices']
+class_names = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices']
 
 nnClassCount = 14 
 
@@ -263,13 +261,14 @@ def response_converter(labels,coords):
     }
     '''
     import numpy as np
+    class_names = ['No Finding', 'Enlarged Cardiomediastinum', 'Cardiomegaly', 'Lung Opacity', 'Lung Lesion', 'Edema', 'Consolidation', 'Pneumonia', 'Atelectasis', 'Pneumothorax', 'Pleural Effusion', 'Pleural Other', 'Fracture', 'Support Devices']
     try:
 
         return {
             
             "response" : {
                 "findings":[{
-                    "name":str(e),
+                    "name":class_names[e],
                     "probability":l
                 } for e,l in enumerate(labels[0])],
                 "rois":[
