@@ -52,6 +52,7 @@ from PIL import Image
 import requests
 import pydicom
 import glob
+from torchvision.models import densenet121
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -130,7 +131,10 @@ def get_pairs(cont_new):
     return(pairs)
 
 def model_fn(model_dir):
-    model = DenseNet121(nnClassCount)
+    from torchvision.models import densenet121
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+    IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+    model =  ChexNet()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     f = "model.pth"
     print(">>>>>>>>>>>>>>> model dir >>>>>>>>")
@@ -139,7 +143,7 @@ def model_fn(model_dir):
     if not os.path.isfile(model_def_path):
         print(f"file not found in {model_def_path}")
         raise RuntimeError("Missing the model definition file")
-    model = torch.nn.DataParallel(model)
+    # model = torch.nn.DataParallel(model)
     modelCheckpoint = torch.load(model_def_path)
     model.load_state_dict(modelCheckpoint['state_dict'])
     model.eval()
@@ -179,10 +183,11 @@ def predict_fn(input_object, model):
     with torch.no_grad():
         logger.info(str(input_object.shape))
         # logger.info(model.classifier)
-        output = model.module.densenet121.features(input_object)
-        l = model(input_object)
+        output = model.backbone(input_object)
+        l = model.forward(input_object)
+        l = torch.sigmoid(l)
         heatmap = None
-        weights = list(model.module.densenet121.features.parameters())[-2]
+        weights = list(model.backbone.parameters())[-2]
         for i in range (0, len(weights)):
             map = output[0,i,:,:]
             if i == 0: 
@@ -203,14 +208,9 @@ def output_fn(predictions, content_type):
     img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
     print(img.min())
     img = (img/1).astype('uint8')
-    binary = threshold(200,255,img)
+    binary = threshold(205,235,img)
     binary = binary.astype(np.int32)
     contours, _ = cv2.findContours(binary,cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE) 
-    # multi_data = []
-    # multidata_dict={}
-    # path_roi = find_file_path("ROIFormat.txt")
-    # with open(path_roi) as json_file:
-    #     data_orig = json.load(json_file)
     coords = get_1D_coord(contours)
     data_final = []
     for coord in coords:
@@ -294,7 +294,7 @@ class CheXpertDataSet(Dataset):
         Upolicy: name the policy with regard to the uncertain labels
         """
         import glob
-        image_names = glob.glob(image_list_file+"/*/*.png",recursive = True )
+        image_names = glob.glob(image_list_file+"/*.png",recursive = True )
                     
         labels = np.ones((len(image_names),nnClassCount))
         self.image_names = image_names
@@ -322,14 +322,14 @@ class CheXpertTrainer():
         optimizer = optim.Adam (model.parameters(), lr=0.0001, betas=(0.9, 0.999), eps=1e-08, weight_decay=1e-5)
                 
         #SETTINGS: LOSS
-        loss = torch.nn.BCELoss(size_average = True)
+        loss = torch.nn.CrossEntropyLoss()
         
         #LOAD CHECKPOINT 
         use_gpu = torch.cuda.is_available()
-        if checkpoint != None and use_gpu:
-            modelCheckpoint = torch.load(checkpoint)
-            model.load_state_dict(modelCheckpoint['state_dict'])
-            optimizer.load_state_dict(modelCheckpoint['optimizer'])
+        if checkpoint != None:
+            state_dict = torch.load(checkpoint)
+            model.load_state_dict(state_dict)
+            print(">>>>>>>>>>>>>>>>>>> MODEL LOADED SUCCESSFULLY >>>>>>>>>>>>>>")
 
         
         #TRAIN THE NETWORK
@@ -498,24 +498,43 @@ class CheXpertTrainer():
             print (class_names[i], ' ', aurocIndividual[i])
         
         return outGT, outPRED
-    
-class DenseNet121(nn.Module):
-    """Model modified.
-    The architecture of our model is the same as standard DenseNet121
-    except the classifier layer which has an additional sigmoid function.
-    """
-    def __init__(self, out_size):
-        super(DenseNet121, self).__init__()
-        self.densenet121 = torchvision.models.densenet121(pretrained=True)
-        num_ftrs = self.densenet121.classifier.in_features
-        self.densenet121.classifier = nn.Sequential(
-            nn.Linear(num_ftrs, out_size),
-            nn.Sigmoid()
-        )
+
+class Flatten(nn.Module):
+    def forward(self, x):
+        x = x.view(x.size()[0], -1)
+        return x
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+from torchvision.models import densenet121
+
+class ChexNet(nn.Module):
+    from torchvision.models import densenet121
+    tfm = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+
+    def __init__(self):
+        super().__init__()
+        self.backbone = densenet121(False).features
+        self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1),
+                                 Flatten(),
+                                 nn.Linear(1024, 14))
 
     def forward(self, x):
-        x = self.densenet121(x)
-        return x
+        return self.head(self.backbone(x))
+
+    def predict(self, image):
+        """
+        input: PIL image (w, h, c)
+        output: prob np.array
+        """
+        image = V(self.tfm(image)[None])
+        image=image.cpu()
+        py = torch.sigmoid(self(image))
+        prob = py.detach().cpu().numpy()[0]
+        return prob
     
 def create_dataloader(traindir,testdir,validdir,batch_size=128):
 
@@ -711,6 +730,14 @@ class HeatmapGenerator():
 #         plt.savefig(pathOutputFile)
 #         plt.show()
 
+def find_file_path(filename):
+    file_path = None
+    for path in glob.glob('**/' + filename, recursive=True):
+        if file_path is None:
+            file_path = os.path.abspath(path)
+            break
+    return file_path
+
 def run(args):
     batch_size = 128
     traindir = args.data_dir_train + "/" #datadir + '/train/'
@@ -754,10 +781,12 @@ def run(args):
     nnClassCount = len(class_names)
     
     
-    data,dataloaders = create_dataloader(traindir,testdir,validdir,batch_size)
+    # data,dataloaders = create_dataloader(traindir,testdir,validdir,batch_size)
     
     dataset = CheXpertDataSet(pathFileTrain ,transformSequence, policy="ones")
-    datasetTest, datasetTrain = random_split(dataset, [1, len(dataset) - 1])
+    # datasetTest, datasetTrain = random_split(dataset, [len(dataset), len(dataset)])
+    datasetTest = dataset
+    datasetTrain = dataset
     datasetValid = CheXpertDataSet(pathFileValid, transformSequence)            
     
     
@@ -774,18 +803,20 @@ def run(args):
     # initialize and load the model
     use_gpu = torch.cuda.is_available()
     if use_gpu:
-        model = DenseNet121(nnClassCount).cuda()
-        model = torch.nn.DataParallel(model).cuda()
+        model = ChexNet().cuda()
+        # model = torch.nn.DataParallel(model).cuda()
     else:
-        model = DenseNet121(nnClassCount)
-        model = torch.nn.DataParallel(model)
+        model = ChexNet()
+        # model = torch.nn.DataParallel(model)
         
 
     timestampTime = time.strftime("%H%M%S")
     timestampDate = time.strftime("%d%m%Y")
     timestampLaunch = timestampDate + '-' + timestampTime
     save_path = args.model_dir
-    batch, losst, losse = CheXpertTrainer.train(model, dataLoaderTrain, dataLoaderVal, nnClassCount, trMaxEpoch, timestampLaunch, None, save_path)
+    path = find_file_path('chexnet.h5')
+    
+    batch, losst, losse = CheXpertTrainer.train(model, dataLoaderTrain, dataLoaderVal, nnClassCount, trMaxEpoch, timestampLaunch, path, save_path)
     print("Model trained")
 
     losstn = []

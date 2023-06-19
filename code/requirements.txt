@@ -3,3 +3,7 @@ pillow
 pydicom
 numpy
 torchsummary
+scikit-learn
+pandas
+opencv-python-headless
+matplotlib
