@@ -210,9 +210,9 @@ def output_fn(predictions, content_type):
     # img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
     print(img.min())
     img = (img/1).astype('uint8')
-    binary = threshold(220,255,img)
-    binary = binary.astype(np.int32)
-    contours, _ = cv2.findContours(binary,cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE) 
+    binary = threshold(220,img.max(),img)
+    # binary = binary.astype(np.int32)
+    contours, _ = cv2.findContours(binary,cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE) 
     coords = get_1D_coord(contours)
     data_final = []
     for coord in coords:
