@@ -277,7 +277,7 @@ def response_converter(labels,coords):
                 } for e,l in enumerate(labels[0])],
                 "rois":[
                     {
-                    "finding_name":str(e),
+                    "finding_name":"Abnormality",
                     "type":"Freehand",
                     "points":coords[e],
                     } for e,l in enumerate(coords)
