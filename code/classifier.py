@@ -73,7 +73,8 @@ def find_file_path(filename):
 
 ''' INFERENCING'''
 def get_json(coord,og_img_size):
-    final_coord = [[coord[x]*(og_img_size[0]/224),coord[y]*(og_img_size[1]/224)] for x,y in zip(list(range(0,len(coord),2)),list(range(1,len(coord),2)))]
+    # final_coord = [[(coord[x]+16)*(og_img_size[0]/256),(coord[y]+16)*(og_img_size[1]/256)] for x,y in zip(list(range(0,len(coord),2)),list(range(1,len(coord),2)))]
+    final_coord = [[coord[x],coord[y]] for x,y in zip(list(range(0,len(coord),2)),list(range(1,len(coord),2)))]
     #final_coord = np.array(final_coord)
     return(final_coord)
 
@@ -134,7 +135,7 @@ def model_fn(model_dir):
     IMAGENET_STD = np.array([0.229, 0.224, 0.225])
     model =  ChexNet()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    f = "model.pth"
+    f = "modele.pth"
     print(">>>>>>>>>>>>>>> model dir >>>>>>>>")
     print(model_dir)
     model_def_path = os.path.join(model_dir, "model.pth")
@@ -164,8 +165,7 @@ def input_fn(request_body, content_type='application/json'):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         image_data = Image.open(requests.get(url, stream=True).raw).convert('RGB')
         image_transform = transforms.Compose([
-            transforms.Resize(size=256),
-            transforms.CenterCrop(size=224),
+            transforms.Resize(size=224),
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
@@ -198,15 +198,19 @@ def predict_fn(input_object, model):
 def output_fn(predictions, content_type):
     assert content_type == 'application/json'
     output,l,npHeatmap,og_img_size = predictions
-    cam = npHeatmap / np.max(npHeatmap)
-    cam = cv2.resize(cam, (224, 224))
-    heatmap = cv2.applyColorMap(np.uint8(255*cam), cv2.COLORMAP_JET)
+    heatmap = npHeatmap
+    heatmap = ((heatmap - heatmap.min()) * (1 / (heatmap.max() - heatmap.min())) * 255).astype(np.uint8)
+    # cam = npHeatmap / np.max(npHeatmap)
+    cam = cv2.resize(heatmap, og_img_size)
+    heatmap = cam
+    # heatmap = cv2.applyColorMap(cam, cv2.COLORMAP_JET)
     #---- Blend original and heatmap 
     temp = heatmap.copy()
-    img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
+    img = temp#[:,:,0]
+    # img = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
     print(img.min())
     img = (img/1).astype('uint8')
-    binary = threshold(205,235,img)
+    binary = threshold(220,255,img)
     binary = binary.astype(np.int32)
     contours, _ = cv2.findContours(binary,cv2.RETR_FLOODFILL, cv2.CHAIN_APPROX_SIMPLE) 
     coords = get_1D_coord(contours)
@@ -333,7 +337,9 @@ class CheXpertTrainer():
         
         #TRAIN THE NETWORK
         lossMIN = 100000
-        
+        epochID = 0
+        lossMIN = 0
+        torch.save({'epoch': epochID + 1, 'state_dict': model.state_dict(), 'best_loss': lossMIN, 'optimizer' : optimizer.state_dict()}, save_path +  "/model.pth")
         for epochID in range(0, trMaxEpoch):
             
             timestampTime = time.strftime("%H%M%S")
@@ -350,7 +356,7 @@ class CheXpertTrainer():
             
             if lossVal < lossMIN:
                 lossMIN = lossVal    
-                torch.save({'epoch': epochID + 1, 'state_dict': model.state_dict(), 'best_loss': lossMIN, 'optimizer' : optimizer.state_dict()}, save_path +  "/model.pth")
+                torch.save({'epoch': epochID + 1, 'state_dict': model.state_dict(), 'best_loss': lossMIN, 'optimizer' : optimizer.state_dict()}, save_path +  "/model_base.pth")
                 print ('Epoch [' + str(epochID + 1) + '] [save] [' + timestampEND + '] loss= ' + str(lossVal))
                 # save_model(model, save_path)
             else:
