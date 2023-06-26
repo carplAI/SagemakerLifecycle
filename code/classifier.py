@@ -213,6 +213,12 @@ def output_fn(predictions, content_type):
     binary = threshold(220,img.max(),img)
     # binary = binary.astype(np.int32)
     contours, _ = cv2.findContours(binary,cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE) 
+    sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    contours = []
+    for countour in sorted_contours[:4]:
+        if cv2.contourArea(countour) > (0.01*og_img_size[0]*og_img_size[1]):
+            contours.append(countour)
+    
     coords = get_1D_coord(contours)
     data_final = []
     for coord in coords:
@@ -274,7 +280,7 @@ def response_converter(labels,coords):
                 "findings":[{
                     "name":class_names[e],
                     "probability":l
-                } for e,l in enumerate(labels[0])],
+                } for e,l in enumerate(labels[0])]+[{"name":"ROIS", "probability" : str(len(coords))}],
                 "rois":[
                     {
                     "finding_name":"Abnormality",
