@@ -216,7 +216,7 @@ def output_fn(predictions, content_type):
     sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
     contours = []
     for countour in sorted_contours[:4]:
-        if cv2.contourArea(countour) > (0.01*og_img_size[0]*og_img_size[1]):
+        if cv2.contourArea(countour) > (0.005*og_img_size[0]*og_img_size[1]):
             contours.append(countour)
     
     coords = get_1D_coord(contours)
@@ -279,7 +279,7 @@ def response_converter(labels,coords):
             "response" : {
                 "findings":[{
                     "name":class_names[e],
-                    "probability":l
+                    "probability":round(l * 100, 2)
                 } for e,l in enumerate(labels[0])]+[{"name":"ROIS", "probability" : str(len(coords))}],
                 "rois":[
                     {
