@@ -764,7 +764,7 @@ def run(args):
     nnClassCount = 14                   #dimension of the output
 
     # Training settings: batch size, maximum number of epochs
-    trBatchSize = 64
+    trBatchSize = 16
     trMaxEpoch = 1
 
     # Parameters related to image transforms: size of the down-scaled image, cropped image
@@ -807,9 +807,9 @@ def run(args):
     # dataLoaderVal = dataloaders["val"]#DataLoader(dataset=datasetValid, batch_size=trBatchSize, shuffle=False, num_workers=24, pin_memory=True)
     # dataLoaderTest = dataloaders["test"]#DataLoader(dataset=datasetTest, num_workers=24, pin_memory=True)
     
-    dataLoaderTrain = DataLoader(dataset=datasetTrain, batch_size=trBatchSize, shuffle=True,  num_workers=24, pin_memory=True)
-    dataLoaderVal = DataLoader(dataset=datasetValid, batch_size=trBatchSize, shuffle=False, num_workers=24, pin_memory=True)
-    dataLoaderTest = DataLoader(dataset=datasetTest, num_workers=24, pin_memory=True)
+    dataLoaderTrain = DataLoader(dataset=datasetTrain, batch_size=trBatchSize, shuffle=True,  num_workers=2, pin_memory=True)
+    dataLoaderVal = DataLoader(dataset=datasetValid, batch_size=trBatchSize, shuffle=False, num_workers=2, pin_memory=True)
+    dataLoaderTest = DataLoader(dataset=datasetTest, num_workers=2, pin_memory=True)
     
     # initialize and load the model
     use_gpu = torch.cuda.is_available()
